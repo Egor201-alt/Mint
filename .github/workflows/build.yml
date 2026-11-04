@@ -1,0 +1,95 @@
+name: Build Mint
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      BUILD_NUMBER: ${{ github.run_number }}
+    steps:
+      - name: Checkout Mint
+        uses: actions/checkout@v7
+        with:
+          path: mint
+
+      - name: Fetch Paper
+        run: |
+          PAPER_SHA=$(tr -d '[:space:]' < mint/PAPER_COMMIT)
+          mkdir paper
+          cd paper
+          git init -q -b main
+          git remote add origin https://github.com/PaperMC/Paper.git
+          git fetch --depth 1 origin "$PAPER_SHA"
+          git checkout -q FETCH_HEAD
+          git config user.email "no-reply@github.com"
+          git config user.name "GitHub Actions"
+          git config --global user.email "no-reply@github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: Apply Mint overlay and branding
+        run: |
+          cp -a mint/overlay/. paper/
+          rm -f paper/.gitkeep
+          cd paper
+          rm -rf .github AGENTS.md SECURITY.md test-plugin
+          sed -i 's|"Implementation-Title" to "Paper"|"Implementation-Title" to "Mint"|; s|"Specification-Title" to "Paper"|"Specification-Title" to "Mint"|; s|"Specification-Vendor" to "Paper Team"|"Specification-Vendor" to "Mint"|; s|"Brand-Name" to "Paper"|"Brand-Name" to "Mint"|' paper-server/build.gradle.kts
+          grep -n '"Brand-Name"' paper-server/build.gradle.kts
+
+      - name: JDK 25
+        uses: actions/setup-java@v5
+        with:
+          java-version: 25
+          distribution: zulu
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Apply patches
+        working-directory: paper
+        run: ./gradlew applyPatches --stacktrace
+
+      - name: Apply Mint edits
+        run: python3 mint/tools/apply_edits.py paper mint/edits
+
+      - name: Build Paperclip jar
+        working-directory: paper
+        run: ./gradlew createPaperclipJar --stacktrace
+
+      - name: Prepare jar
+        id: jar
+        working-directory: paper
+        run: |
+          MC=$(./gradlew -q printMinecraftVersion | tail -n 1)
+          SRC=$(ls paper-server/build/libs/paper-paperclip-*.jar | head -n 1)
+          OUT="mint-${MC}-${GITHUB_RUN_NUMBER}.jar"
+          cp "$SRC" "$GITHUB_WORKSPACE/$OUT"
+          echo "name=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.jar.outputs.name }}
+          path: ${{ steps.jar.outputs.name }}
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${GITHUB_RUN_NUMBER}" "${{ steps.jar.outputs.name }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Mint build ${GITHUB_RUN_NUMBER}" \
+            --notes "Commit ${GITHUB_SHA}" \
+            --target "${GITHUB_SHA}"

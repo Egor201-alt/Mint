@@ -1,0 +1,69 @@
+name: Inspect Source
+
+on:
+  workflow_dispatch:
+    inputs:
+      classes:
+        description: "Comma-separated class names (without .java)"
+        required: true
+        default: "ChunkMap,ServerEntity,ServerChunkCache,NaturalSpawner,PathNavigation,GroundPathNavigation,PathFinder,Connection,ServerGamePacketListenerImpl,Brain,Sensor,NearestLivingEntitySensor,GoalSelector"
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Mint
+        uses: actions/checkout@v7
+        with:
+          path: mint
+
+      - name: Fetch Paper
+        run: |
+          PAPER_SHA=$(tr -d '[:space:]' < mint/PAPER_COMMIT)
+          mkdir paper
+          cd paper
+          git init -q -b main
+          git remote add origin https://github.com/PaperMC/Paper.git
+          git fetch --depth 1 origin "$PAPER_SHA"
+          git checkout -q FETCH_HEAD
+          git config --global user.email "no-reply@github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: JDK 25
+        uses: actions/setup-java@v5
+        with:
+          java-version: 25
+          distribution: zulu
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Apply patches
+        working-directory: paper
+        run: ./gradlew applyPatches --stacktrace
+
+      - name: Collect sources
+        env:
+          CLASSES: ${{ inputs.classes }}
+        run: |
+          mkdir dump
+          IFS=',' read -ra NAMES <<< "$CLASSES"
+          for NAME in "${NAMES[@]}"; do
+            NAME=$(echo "$NAME" | tr -d '[:space:]')
+            find paper/paper-server/src/minecraft/java -name "${NAME}.java" | while read -r F; do
+              REL="${F#paper/paper-server/src/minecraft/java/}"
+              mkdir -p "dump/$(dirname "$REL")"
+              cp "$F" "dump/$REL"
+              echo "$REL"
+            done
+          done
+          cd dump
+          zip -qr ../source-dump.zip .
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: source-dump
+          path: source-dump.zip
+          retention-days: 7
